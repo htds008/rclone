@@ -61,6 +61,10 @@ vars:
 	@echo GO_VERSION="'$(GO_VERSION)'"
 	@echo BETA_URL="'$(BETA_URL)'"
 
+btest:
+	@echo "[$(TAG)]($(BETA_URL)) on branch [$(BRANCH)](https://github.com/rclone/rclone/tree/$(BRANCH)) (uploaded in 15-30 mins)" | xclip -r -sel clip
+	@echo "Copied markdown of beta release to clip board"
+
 version:
 	@echo '$(TAG)'
 
@@ -109,16 +113,16 @@ tidy:
 doc:	rclone.1 MANUAL.html MANUAL.txt rcdocs commanddocs
 
 rclone.1:	MANUAL.md
-	pandoc -s --from markdown --to man MANUAL.md -o rclone.1
+	pandoc -s --from markdown-smart --to man MANUAL.md -o rclone.1
 
 MANUAL.md:	bin/make_manual.py docs/content/*.md commanddocs backenddocs
 	./bin/make_manual.py
 
 MANUAL.html:	MANUAL.md
-	pandoc -s --from markdown --to html MANUAL.md -o MANUAL.html
+	pandoc -s --from markdown-smart --to html MANUAL.md -o MANUAL.html
 
 MANUAL.txt:	MANUAL.md
-	pandoc -s --from markdown --to plain MANUAL.md -o MANUAL.txt
+	pandoc -s --from markdown-smart --to plain MANUAL.md -o MANUAL.txt
 
 commanddocs: rclone
 	XDG_CACHE_HOME="" XDG_CONFIG_HOME="" HOME="\$$HOME" USER="\$$USER" rclone gendocs docs/content/
