@@ -162,13 +162,13 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	return errs.Err()
 }
 
-// Purge all files in the root and the root directory
+// Purge all files in the directory
 //
 // Implement this if you have a way of deleting all the files
 // quicker than just running Remove() on the result of List()
 //
 // Return an error if it doesn't exist
-func (f *Fs) Purge(ctx context.Context) error {
+func (f *Fs) Purge(ctx context.Context, dir string) error {
 	for _, r := range f.upstreams {
 		if r.Features().Purge == nil {
 			return fs.ErrorCantPurge
@@ -180,7 +180,10 @@ func (f *Fs) Purge(ctx context.Context) error {
 	}
 	errs := Errors(make([]error, len(upstreams)))
 	multithread(len(upstreams), func(i int) {
-		err := upstreams[i].Features().Purge(ctx)
+		err := upstreams[i].Features().Purge(ctx, dir)
+		if errors.Cause(err) == fs.ErrorDirNotFound {
+			err = nil
+		}
 		errs[i] = errors.Wrap(err, upstreams[i].Name())
 	})
 	return errs.Err()
@@ -504,6 +507,9 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	}
 	for _, u := range f.upstreams {
 		usg, err := u.About(ctx)
+		if errors.Cause(err) == fs.ErrorDirNotFound {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

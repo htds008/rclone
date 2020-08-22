@@ -103,13 +103,7 @@ func init() {
 				log.Fatalf("Failed to configure token: %v", err)
 			}
 		},
-		Options: []fs.Option{{
-			Name: config.ConfigClientID,
-			Help: "Pcloud App Client Id\nLeave blank normally.",
-		}, {
-			Name: config.ConfigClientSecret,
-			Help: "Pcloud App Client Secret\nLeave blank normally.",
-		}, {
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -128,10 +122,20 @@ func init() {
 			Name: "hostname",
 			Help: `Hostname to connect to.
 
-This is normally set when rclone initially does the oauth connection.`,
+This is normally set when rclone initially does the oauth connection,
+however you will need to set it by hand if you are using remote config
+with rclone authorize.
+`,
 			Default:  defaultHostname,
 			Advanced: true,
-		}},
+			Examples: []fs.OptionExample{{
+				Value: defaultHostname,
+				Help:  "Original/US region",
+			}, {
+				Value: "eapi.pcloud.com",
+				Help:  "EU region",
+			}},
+		}}...),
 	})
 }
 
@@ -671,13 +675,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return dstObj, nil
 }
 
-// Purge deletes all the files and the container
+// Purge deletes all the files in the directory
 //
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purgeCheck(ctx, "", false)
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	return f.purgeCheck(ctx, dir, false)
 }
 
 // CleanUp empties the trash
@@ -820,14 +824,19 @@ func (f *Fs) linkDir(ctx context.Context, dirID string, expire fs.Duration) (str
 }
 
 func (f *Fs) linkFile(ctx context.Context, path string, expire fs.Duration) (string, error) {
+	obj, err := f.NewObject(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	o := obj.(*Object)
 	opts := rest.Opts{
 		Method:     "POST",
 		Path:       "/getfilepublink",
 		Parameters: url.Values{},
 	}
 	var result api.PubLinkResult
-	opts.Parameters.Set("path", path)
-	err := f.pacer.Call(func() (bool, error) {
+	opts.Parameters.Set("fileid", fileIDtoNumber(o.id))
+	err = f.pacer.Call(func() (bool, error) {
 		resp, err := f.srv.CallJSON(ctx, &opts, nil, &result)
 		err = result.Error.Update(err)
 		return shouldRetry(resp, err)
@@ -840,11 +849,6 @@ func (f *Fs) linkFile(ctx context.Context, path string, expire fs.Duration) (str
 
 // PublicLink adds a "readable by anyone with link" permission on the given file or folder.
 func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
-	err := f.dirCache.FindRoot(ctx, false)
-	if err != nil {
-		return "", err
-	}
-
 	dirID, err := f.dirCache.FindDir(ctx, remote, false)
 	if err == fs.ErrorDirNotFound {
 		return f.linkFile(ctx, remote, expire)

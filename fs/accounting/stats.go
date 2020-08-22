@@ -16,6 +16,8 @@ import (
 // MaxCompletedTransfers specifies maximum number of completed transfers in startedTransfers list
 var MaxCompletedTransfers = 100
 
+var startTime = time.Now()
+
 // StatsInfo accounts all transfers
 type StatsInfo struct {
 	mu                sync.RWMutex
@@ -66,30 +68,14 @@ func (s *StatsInfo) RemoteStats() (out rc.Params, err error) {
 	out["transfers"] = s.transfers
 	out["deletes"] = s.deletes
 	out["renames"] = s.renames
-	out["elapsedTime"] = s.totalDuration().Seconds()
+	out["transferTime"] = s.totalDuration().Seconds()
+	out["elapsedTime"] = time.Since(startTime).Seconds()
 	s.mu.RUnlock()
 	if !s.checking.empty() {
-		var c []string
-		s.checking.mu.RLock()
-		defer s.checking.mu.RUnlock()
-		for _, tr := range s.checking.sortedSlice() {
-			c = append(c, tr.remote)
-		}
-		out["checking"] = c
+		out["checking"] = s.checking.remotes()
 	}
 	if !s.transferring.empty() {
-		s.transferring.mu.RLock()
-
-		var t []rc.Params
-		for _, tr := range s.transferring.sortedSlice() {
-			if acc := s.inProgress.get(tr.remote); acc != nil {
-				t = append(t, acc.RemoteStats())
-			} else {
-				t = append(t, s.transferRemoteStats(tr))
-			}
-		}
-		out["transferring"] = t
-		s.transferring.mu.RUnlock()
+		out["transferring"] = s.transferring.rcStats(s.inProgress)
 	}
 	if s.errors > 0 {
 		out["lastError"] = s.lastError.Error()
@@ -106,13 +92,6 @@ func (s *StatsInfo) Speed() float64 {
 		speed = float64(s.bytes) / dtSeconds
 	}
 	return speed
-}
-
-func (s *StatsInfo) transferRemoteStats(tr *Transfer) rc.Params {
-	return rc.Params{
-		"name": tr.remote,
-		"size": tr.size,
-	}
 }
 
 // timeRange is a start and end time of a transfer
@@ -248,9 +227,10 @@ func (s *StatsInfo) String() string {
 
 	s.mu.RLock()
 
+	elapsedTime := time.Since(startTime)
+	elapsedTimeSecondsOnly := elapsedTime.Truncate(time.Second/10) % time.Minute
 	dt := s.totalDuration()
 	dtSeconds := dt.Seconds()
-	dtSecondsOnly := dt.Truncate(time.Second/10) % time.Minute
 	speed := 0.0
 	if dt > 0 {
 		speed = float64(s.bytes) / dtSeconds
@@ -332,7 +312,7 @@ func (s *StatsInfo) String() string {
 			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s\n",
 				s.transfers, totalTransfer, percent(s.transfers, totalTransfer))
 		}
-		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(dt.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", dtSecondsOnly.Seconds()))
+		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(elapsedTime.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", elapsedTimeSecondsOnly.Seconds()))
 	}
 
 	// checking and transferring have their own locking so unlock

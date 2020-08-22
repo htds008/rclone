@@ -87,26 +87,23 @@ func init() {
 		Config: func(name string, m configmap.Mapper) {
 			jsonFile, ok := m.Get("box_config_file")
 			boxSubType, boxSubTypeOk := m.Get("box_sub_type")
+			boxAccessToken, boxAccessTokenOk := m.Get("access_token")
 			var err error
+			// If using box config.json, use JWT auth
 			if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
 				err = refreshJWTToken(jsonFile, boxSubType, name, m)
 				if err != nil {
 					log.Fatalf("Failed to configure token with jwt authentication: %v", err)
 				}
-			} else {
+				// Else, if not using an access token, use oauth2
+			} else if boxAccessToken == "" || !boxAccessTokenOk {
 				err = oauthutil.Config("box", name, m, oauthConfig, nil)
 				if err != nil {
 					log.Fatalf("Failed to configure token with oauth authentication: %v", err)
 				}
 			}
 		},
-		Options: []fs.Option{{
-			Name: config.ConfigClientID,
-			Help: "Box App Client Id.\nLeave blank normally.",
-		}, {
-			Name: config.ConfigClientSecret,
-			Help: "Box App Client Secret\nLeave blank normally.",
-		}, {
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     "root_folder_id",
 			Help:     "Fill in for rclone to use a non root folder as its starting point.",
 			Default:  "0",
@@ -114,6 +111,9 @@ func init() {
 		}, {
 			Name: "box_config_file",
 			Help: "Box App config.json location\nLeave blank normally." + env.ShellExpandHelp,
+		}, {
+			Name: "access_token",
+			Help: "Box App Primary Access Token\nLeave blank normally.",
 		}, {
 			Name:    "box_sub_type",
 			Default: "user",
@@ -149,7 +149,7 @@ func init() {
 				encoder.EncodeBackSlash |
 				encoder.EncodeRightSpace |
 				encoder.EncodeInvalidUtf8),
-		}},
+		}}...),
 	})
 }
 
@@ -247,6 +247,7 @@ type Options struct {
 	CommitRetries int                  `config:"commit_retries"`
 	Enc           encoder.MultiEncoder `config:"encoding"`
 	RootFolderID  string               `config:"root_folder_id"`
+	AccessToken   string               `config:"access_token"`
 }
 
 // Fs represents a remote box
@@ -385,16 +386,22 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	root = parsePath(root)
-	oAuthClient, ts, err := oauthutil.NewClient(name, m, oauthConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure Box")
+
+	client := fshttp.NewClient(fs.Config)
+	var ts *oauthutil.TokenSource
+	// If not using an accessToken, create an oauth client and tokensource
+	if opt.AccessToken == "" {
+		client, ts, err = oauthutil.NewClient(name, m, oauthConfig)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to configure Box")
+		}
 	}
 
 	f := &Fs{
 		name:        name,
 		root:        root,
 		opt:         *opt,
-		srv:         rest.NewClient(oAuthClient).SetRoot(rootURL),
+		srv:         rest.NewClient(client).SetRoot(rootURL),
 		pacer:       fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
 	}
@@ -404,23 +411,30 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}).Fill(f)
 	f.srv.SetErrorHandler(errorHandler)
 
+	// If using an accessToken, set the Authorization header
+	if f.opt.AccessToken != "" {
+		f.srv.SetHeader("Authorization", "Bearer "+f.opt.AccessToken)
+	}
+
 	jsonFile, ok := m.Get("box_config_file")
 	boxSubType, boxSubTypeOk := m.Get("box_sub_type")
 
-	// If using box config.json and JWT, renewing should just refresh the token and
-	// should do so whether there are uploads pending or not.
-	if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
-		f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-			err := refreshJWTToken(jsonFile, boxSubType, name, m)
-			return err
-		})
-		f.tokenRenewer.Start()
-	} else {
-		// Renew the token in the background
-		f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-			_, err := f.readMetaDataForPath(ctx, "")
-			return err
-		})
+	if ts != nil {
+		// If using box config.json and JWT, renewing should just refresh the token and
+		// should do so whether there are uploads pending or not.
+		if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
+			f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+				err := refreshJWTToken(jsonFile, boxSubType, name, m)
+				return err
+			})
+			f.tokenRenewer.Start()
+		} else {
+			// Renew the token in the background
+			f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+				_, err := f.readMetaDataForPath(ctx, "")
+				return err
+			})
+		}
 	}
 
 	// Get rootFolderID
@@ -842,8 +856,8 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purgeCheck(ctx, "", false)
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	return f.purgeCheck(ctx, dir, false)
 }
 
 // move a file or folder
@@ -1258,8 +1272,10 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
-	o.fs.tokenRenewer.Start()
-	defer o.fs.tokenRenewer.Stop()
+	if o.fs.tokenRenewer != nil {
+		o.fs.tokenRenewer.Start()
+		defer o.fs.tokenRenewer.Stop()
+	}
 
 	size := src.Size()
 	modTime := src.ModTime(ctx)
