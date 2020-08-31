@@ -401,3 +401,6 @@ put them back in again.` >}}
   * David Ibarra <david.ibarra@realty.com>
   * Tim Gallant <tim@lilt.com>
   * Kaloyan Raev <kaloyan@storj.io>
+  * Jay McEntire <jay.mcentire@gmail.com>
+  * Leo Luan <leoluan@us.ibm.com>
+  * aus <549081+aus@users.noreply.github.com>
