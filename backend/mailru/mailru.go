@@ -37,6 +37,7 @@ import (
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/lib/rest"
 
 	"github.com/pkg/errors"
@@ -191,7 +192,7 @@ This option must not be used by an ordinary user. It is intended only to
 facilitate remote troubleshooting of backend issues. Strict meaning of
 flags is not documented and not guaranteed to persist between releases.
 Quirks will be removed when the backend grows stable.
-Supported quirks: atomicmkdir binlist gzip insecure retry400`,
+Supported quirks: atomicmkdir binlist`,
 		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
@@ -237,9 +238,6 @@ func shouldRetry(res *http.Response, err error, f *Fs, opts *rest.Opts) (bool, e
 		reAuthErr := f.reAuthorize(opts, err)
 		return reAuthErr == nil, err // return an original error
 	}
-	if res != nil && res.StatusCode == 400 && f.quirks.retry400 {
-		return true, err
-	}
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(res, retryErrorCodes), err
 }
 
@@ -275,7 +273,7 @@ type Fs struct {
 	root         string             // root path
 	opt          Options            // parsed options
 	speedupGlobs []string           // list of file name patterns eligible for speedup
-	speedupAny   bool               // true if all file names are aligible for speedup
+	speedupAny   bool               // true if all file names are eligible for speedup
 	features     *fs.Features       // optional features
 	srv          *rest.Client       // REST API client
 	cli          *http.Client       // underlying HTTP client (for authorize)
@@ -341,19 +339,13 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if opt.UserAgent != "" {
 		clientConfig.UserAgent = opt.UserAgent
 	}
-	clientConfig.NoGzip = !f.quirks.gzip // Send not "Accept-Encoding: gzip" like official client
+	clientConfig.NoGzip = true // Mimic official client, skip sending "Accept-Encoding: gzip"
 	f.cli = fshttp.NewClient(&clientConfig)
 
 	f.srv = rest.NewClient(f.cli)
 	f.srv.SetRoot(api.APIServerURL)
 	f.srv.SetHeader("Accept", "*/*") // Send "Accept: */*" with every request like official client
 	f.srv.SetErrorHandler(errorHandler)
-
-	if f.quirks.insecure {
-		transport := f.cli.Transport.(*fshttp.Transport).Transport
-		transport.TLSClientConfig.InsecureSkipVerify = true
-		transport.ProxyConnectHeader = http.Header{"User-Agent": {clientConfig.UserAgent}}
-	}
 
 	if err = f.authorize(ctx, false); err != nil {
 		return nil, err
@@ -387,30 +379,13 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 // Internal maintenance flags (to be removed when the backend matures).
 // Primarily intended to facilitate remote support and troubleshooting.
 type quirks struct {
-	gzip        bool
-	insecure    bool
 	binlist     bool
 	atomicmkdir bool
-	retry400    bool
 }
 
 func (q *quirks) parseQuirks(option string) {
 	for _, flag := range strings.Split(option, ",") {
 		switch strings.ToLower(strings.TrimSpace(flag)) {
-		case "gzip":
-			// This backend mimics the official client which never sends the
-			// "Accept-Encoding: gzip" header. However, enabling compression
-			// might be good for performance.
-			// Use this quirk to investigate the performance impact.
-			// Remove this quirk if performance does not improve.
-			q.gzip = true
-		case "insecure":
-			// The mailru disk-o protocol is not documented. To compare HTTP
-			// stream against the official client one can use Telerik Fiddler,
-			// which introduces a self-signed certificate. This quirk forces
-			// the Go http layer to accept it.
-			// Remove this quirk when the backend reaches maturity.
-			q.insecure = true
 		case "binlist":
 			// The official client sometimes uses a so called "bin" protocol,
 			// implemented in the listBin file system method below. This method
@@ -423,18 +398,11 @@ func (q *quirks) parseQuirks(option string) {
 		case "atomicmkdir":
 			// At the moment rclone requires Mkdir to return success if the
 			// directory already exists. However, such programs as borgbackup
-			// or restic use mkdir as a locking primitive and depend on its
-			// atomicity. This quirk is a workaround. It can be removed
-			// when the above issue is investigated.
+			// use mkdir as a locking primitive and depend on its atomicity.
+			// Remove this quirk when the above issue is investigated.
 			q.atomicmkdir = true
-		case "retry400":
-			// This quirk will help in troubleshooting a very rare "Error 400"
-			// issue. It can be removed if the problem does not show up
-			// for a year or so. See the below issue:
-			// https://github.com/ivandeex/rclone/issues/14
-			q.retry400 = true
 		default:
-			// Just ignore all unknown flags
+			// Ignore unknown flags
 		}
 	}
 }
@@ -655,9 +623,14 @@ func (f *Fs) itemToDirEntry(ctx context.Context, item *api.ListItem) (entry fs.D
 	if err != nil {
 		return nil, -1, err
 	}
+	mTime := int64(item.Mtime)
+	if mTime < 0 {
+		fs.Debugf(f, "Fixing invalid timestamp %d on mailru file %q", mTime, remote)
+		mTime = 0
+	}
 	switch item.Kind {
 	case "folder":
-		dir := fs.NewDir(remote, time.Unix(item.Mtime, 0)).SetSize(item.Size)
+		dir := fs.NewDir(remote, time.Unix(mTime, 0)).SetSize(item.Size)
 		dirSize := item.Count.Files + item.Count.Folders
 		return dir, dirSize, nil
 	case "file":
@@ -671,7 +644,7 @@ func (f *Fs) itemToDirEntry(ctx context.Context, item *api.ListItem) (entry fs.D
 			hasMetaData: true,
 			size:        item.Size,
 			mrHash:      binHash,
-			modTime:     time.Unix(item.Mtime, 0),
+			modTime:     time.Unix(mTime, 0),
 		}
 		return file, -1, nil
 	default:
@@ -1861,30 +1834,30 @@ func (f *Fs) uploadShard(ctx context.Context) (string, error) {
 		return f.shardURL, nil
 	}
 
-	token, err := f.accessToken()
-	if err != nil {
-		return "", err
-	}
-
 	opts := rest.Opts{
-		Method: "GET",
-		Path:   "/api/m1/dispatcher",
-		Parameters: url.Values{
-			"client_id":    {api.OAuthClientID},
-			"access_token": {token},
-		},
+		RootURL: api.DispatchServerURL,
+		Method:  "GET",
+		Path:    "/u",
 	}
 
-	var info api.ShardInfoResponse
+	var (
+		res *http.Response
+		url string
+		err error
+	)
 	err = f.pacer.Call(func() (bool, error) {
-		res, err := f.srv.CallJSON(ctx, &opts, nil, &info)
-		return shouldRetry(res, err, f, &opts)
+		res, err = f.srv.Call(ctx, &opts)
+		if err == nil {
+			url, err = readBodyWord(res)
+		}
+		return fserrors.ShouldRetry(err), err
 	})
 	if err != nil {
+		closeBody(res)
 		return "", err
 	}
 
-	f.shardURL = info.Body.Upload[0].URL
+	f.shardURL = url
 	f.shardExpiry = time.Now().Add(shardExpirySec * time.Second)
 	fs.Debugf(f, "new upload shard: %s", f.shardURL)
 
@@ -2116,7 +2089,18 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return nil, err
 	}
 
-	start, end, partial := getTransferRange(o.size, options...)
+	start, end, partialRequest := getTransferRange(o.size, options...)
+
+	headers := map[string]string{
+		"Accept":       "*/*",
+		"Content-Type": "application/octet-stream",
+	}
+	if partialRequest {
+		rangeStr := fmt.Sprintf("bytes=%d-%d", start, end-1)
+		headers["Range"] = rangeStr
+		// headers["Content-Range"] = rangeStr
+		headers["Accept-Ranges"] = "bytes"
+	}
 
 	// TODO: set custom timeouts
 	opts := rest.Opts{
@@ -2127,10 +2111,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 			"client_id": {api.OAuthClientID},
 			"token":     {token},
 		},
-		ExtraHeaders: map[string]string{
-			"Accept": "*/*",
-			"Range":  fmt.Sprintf("bytes=%d-%d", start, end-1),
-		},
+		ExtraHeaders: headers,
 	}
 
 	var res *http.Response
@@ -2151,17 +2132,35 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return nil, err
 	}
 
-	var hasher gohash.Hash
-	if !partial {
+	// Server should respond with Status 206 and Content-Range header to a range
+	// request. Status 200 (and no Content-Range) means a full-content response.
+	partialResponse := res.StatusCode == 206
+
+	var (
+		hasher     gohash.Hash
+		wrapStream io.ReadCloser
+	)
+	if !partialResponse {
 		// Cannot check hash of partial download
 		hasher = mrhash.New()
 	}
-	wrapStream := &endHandler{
+	wrapStream = &endHandler{
 		ctx:    ctx,
 		stream: res.Body,
 		hasher: hasher,
 		o:      o,
 		server: server,
+	}
+	if partialRequest && !partialResponse {
+		fs.Debugf(o, "Server returned full content instead of range")
+		if start > 0 {
+			// Discard the beginning of the data
+			_, err = io.CopyN(ioutil.Discard, wrapStream, start)
+			if err != nil {
+				return nil, err
+			}
+		}
+		wrapStream = readers.NewLimitedReadCloser(wrapStream, end-start)
 	}
 	return wrapStream, nil
 }
@@ -2215,7 +2214,7 @@ func (e *endHandler) handle(err error) error {
 	return io.EOF
 }
 
-// serverPool backs server dispacher
+// serverPool backs server dispatcher
 type serverPool struct {
 	pool      pendingServerMap
 	mu        sync.Mutex

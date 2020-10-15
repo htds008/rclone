@@ -306,10 +306,10 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 // will return the object and the error, otherwise will return
 // nil and the error
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	exisitingObj, err := f.NewObject(ctx, src.Remote())
+	existingObj, err := f.NewObject(ctx, src.Remote())
 	switch err {
 	case nil:
-		return exisitingObj, exisitingObj.Update(ctx, in, src, options...)
+		return existingObj, existingObj.Update(ctx, in, src, options...)
 	case fs.ErrorObjectNotFound:
 		// Not found so create it
 		return f.PutUnchecked(ctx, in, src, options...)
@@ -323,7 +323,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 // This will create a duplicate if we upload a new file without
 // checking to see if there is one already - use Put() for that.
 func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, remote string, size int64, options ...fs.OpenOption) (fs.Object, error) {
-	if size > int64(100e9) {
+	if size > int64(300e9) {
 		return nil, errors.New("File too big, cant upload")
 	} else if size == 0 {
 		return nil, fs.ErrorCantUploadEmptyFiles

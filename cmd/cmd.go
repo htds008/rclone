@@ -1,4 +1,4 @@
-// Package cmd implemnts the rclone command
+// Package cmd implements the rclone command
 //
 // It is in a sub package so it's internals can be re-used elsewhere
 package cmd
@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	systemd "github.com/iguanesolutions/go-systemd/v5"
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
@@ -35,6 +36,7 @@ import (
 	"github.com/rclone/rclone/fs/rc/rcflags"
 	"github.com/rclone/rclone/fs/rc/rcserver"
 	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/terminal"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -89,8 +91,10 @@ func NewFsFile(remote string) (fs.Fs, string) {
 	f, err := cache.Get(remote)
 	switch err {
 	case fs.ErrorIsFile:
+		cache.Pin(f) // pin indefinitely since it was on the CLI
 		return f, path.Base(fsPath)
 	case nil:
+		cache.Pin(f) // pin indefinitely since it was on the CLI
 		return f, ""
 	default:
 		err = fs.CountError(err)
@@ -139,6 +143,7 @@ func newFsDir(remote string) fs.Fs {
 		err = fs.CountError(err)
 		log.Fatalf("Failed to create file system for %q: %v", remote, err)
 	}
+	cache.Pin(f) // pin indefinitely since it was on the CLI
 	return f
 }
 
@@ -197,6 +202,7 @@ func NewFsSrcDstFiles(args []string) (fsrc fs.Fs, srcFileName string, fdst fs.Fs
 		_ = fs.CountError(err)
 		log.Fatalf("Failed to create file system for destination %q: %v", dstRemote, err)
 	}
+	cache.Pin(fdst) // pin indefinitely since it was on the CLI
 	return
 }
 
@@ -284,6 +290,11 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 	}
 	fs.Debugf(nil, "%d go routines active\n", runtime.NumGoroutine())
 
+	if fs.Config.Progress && fs.Config.ProgressTerminalTitle {
+		// Clear terminal title
+		terminal.WriteTerminalTitle("")
+	}
+
 	// dump all running go-routines
 	if fs.Config.Dump&fs.DumpGoRoutines != 0 {
 		err := pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
@@ -360,6 +371,12 @@ func StartStats() func() {
 
 // initConfig is run by cobra after initialising the flags
 func initConfig() {
+	// Activate logger systemd support if systemd invocation ID is detected
+	_, sysdLaunch := systemd.GetInvocationID()
+	if sysdLaunch {
+		fs.Config.LogSystemdSupport = true // used during fslog.InitLogging()
+	}
+
 	// Start the logger
 	fslog.InitLogging()
 
@@ -374,6 +391,13 @@ func initConfig() {
 
 	// Write the args for debug purposes
 	fs.Debugf("rclone", "Version %q starting with parameters %q", fs.Version, os.Args)
+
+	// Inform user about systemd log support now that we have a logger
+	if sysdLaunch {
+		fs.Debugf("rclone", "systemd logging support automatically activated")
+	} else if fs.Config.LogSystemdSupport {
+		fs.Debugf("rclone", "systemd logging support manually activated")
+	}
 
 	// Start the remote control server if configured
 	_, err = rcserver.Start(&rcflags.Opt)
@@ -489,7 +513,7 @@ func AddBackendFlags() {
 				if opt.IsPassword {
 					help += " (obscured)"
 				}
-				flag := pflag.CommandLine.VarPF(opt, name, opt.ShortOpt, help)
+				flag := flags.VarPF(pflag.CommandLine, opt, name, opt.ShortOpt, help)
 				if _, isBool := opt.Default.(bool); isBool {
 					flag.NoOptDefVal = "true"
 				}

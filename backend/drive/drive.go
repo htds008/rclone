@@ -17,7 +17,6 @@ import (
 	"log"
 	"mime"
 	"net/http"
-	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -36,6 +35,7 @@ import (
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
+	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/walk"
@@ -70,7 +70,7 @@ const (
 	// 1<<18 is the minimum size supported by the Google uploader, and there is no maximum.
 	minChunkSize     = 256 * fs.KibiByte
 	defaultChunkSize = 8 * fs.MebiByte
-	partialFields    = "id,name,size,md5Checksum,trashed,explicitlyTrashed,modifiedTime,createdTime,mimeType,parents,webViewLink,shortcutDetails"
+	partialFields    = "id,name,size,md5Checksum,trashed,explicitlyTrashed,modifiedTime,createdTime,mimeType,parents,webViewLink,shortcutDetails,exportLinks"
 	listRGrouping    = 50   // number of IDs to search at once when using ListR
 	listRInputBuffer = 1000 // size of input buffer when using ListR
 )
@@ -158,6 +158,17 @@ func driveScopesContainsAppFolder(scopes []string) bool {
 	return false
 }
 
+func driveOAuthOptions() []fs.Option {
+	opts := []fs.Option{}
+	for _, opt := range oauthutil.SharedOptions {
+		if opt.Name == config.ConfigClientID {
+			opt.Help = "Google Application Client Id\nSetting your own is recommended.\nSee https://rclone.org/drive/#making-your-own-client-id for how to create your own.\nIf you leave this blank, it will use an internal key which is low performance."
+		}
+		opts = append(opts, opt)
+	}
+	return opts
+}
+
 // Register with Fs
 func init() {
 	fs.Register(&fs.RegInfo{
@@ -193,7 +204,7 @@ func init() {
 				log.Fatalf("Failed to configure team drive: %v", err)
 			}
 		},
-		Options: append(oauthutil.SharedOptions, []fs.Option{{
+		Options: append(driveOAuthOptions(), []fs.Option{{
 			Name: "scope",
 			Help: "Scope that rclone should use when requesting access from drive.",
 			Examples: []fs.OptionExample{{
@@ -354,17 +365,8 @@ date is used.`,
 		}, {
 			Name:    "alternate_export",
 			Default: false,
-			Help: `Use alternate export URLs for google documents export.,
-
-If this option is set this instructs rclone to use an alternate set of
-export URLs for drive documents.  Users have reported that the
-official export URLs can't export large documents, whereas these
-unofficial ones can.
-
-See rclone issue [#2243](https://github.com/rclone/rclone/issues/2243) for background,
-[this google drive issue](https://issuetracker.google.com/issues/36761333) and
-[this helpful post](https://www.labnol.org/internet/direct-links-for-google-drive/28356/).`,
-			Advanced: true,
+			Help:    "Deprecated: no longer needed",
+			Hide:    fs.OptionHideBoth,
 		}, {
 			Name:     "upload_cutoff",
 			Default:  defaultChunkSize,
@@ -472,6 +474,21 @@ See: https://github.com/rclone/rclone/issues/3857
 `,
 			Advanced: true,
 		}, {
+			Name:    "stop_on_download_limit",
+			Default: false,
+			Help: `Make download limit errors be fatal
+
+At the time of writing it is only possible to download 10TB of data from
+Google Drive a day (this is an undocumented limit). When this limit is
+reached Google Drive produces a slightly different error message. When
+this flag is set it causes these errors to be fatal.  These will stop
+the in-progress sync.
+
+Note that this detection is relying on error message strings which
+Google don't document so it may break in the future.
+`,
+			Advanced: true,
+		}, {
 			Name: "skip_shortcuts",
 			Help: `If set skip shortcut files
 
@@ -527,7 +544,6 @@ type Options struct {
 	UseSharedDate             bool                 `config:"use_shared_date"`
 	ListChunk                 int64                `config:"list_chunk"`
 	Impersonate               string               `config:"impersonate"`
-	AlternateExport           bool                 `config:"alternate_export"`
 	UploadCutoff              fs.SizeSuffix        `config:"upload_cutoff"`
 	ChunkSize                 fs.SizeSuffix        `config:"chunk_size"`
 	AcknowledgeAbuse          bool                 `config:"acknowledge_abuse"`
@@ -539,6 +555,7 @@ type Options struct {
 	ServerSideAcrossConfigs   bool                 `config:"server_side_across_configs"`
 	DisableHTTP2              bool                 `config:"disable_http2"`
 	StopOnUploadLimit         bool                 `config:"stop_on_upload_limit"`
+	StopOnDownloadLimit       bool                 `config:"stop_on_download_limit"`
 	SkipShortcuts             bool                 `config:"skip_shortcuts"`
 	Enc                       encoder.MultiEncoder `config:"encoding"`
 }
@@ -638,6 +655,9 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 					return false, fserrors.FatalError(err)
 				}
 				return true, err
+			} else if f.opt.StopOnDownloadLimit && reason == "downloadQuotaExceeded" {
+				fs.Errorf(f, "Received download limit error: %v", err)
+				return false, fserrors.FatalError(err)
 			} else if f.opt.StopOnUploadLimit && reason == "teamDriveFileLimitExceeded" {
 				fs.Errorf(f, "Received team drive file limit error: %v", err)
 				return false, fserrors.FatalError(err)
@@ -1253,20 +1273,7 @@ func (f *Fs) newDocumentObject(remote string, info *drive.File, extension, expor
 	if err != nil {
 		return nil, err
 	}
-	id := actualID(info.Id)
-	url := fmt.Sprintf("%sfiles/%s/export?mimeType=%s", f.svc.BasePath, id, url.QueryEscape(mediaType))
-	if f.opt.AlternateExport {
-		switch info.MimeType {
-		case "application/vnd.google-apps.drawing":
-			url = fmt.Sprintf("https://docs.google.com/drawings/d/%s/export/%s", id, extension[1:])
-		case "application/vnd.google-apps.document":
-			url = fmt.Sprintf("https://docs.google.com/document/d/%s/export?format=%s", id, extension[1:])
-		case "application/vnd.google-apps.spreadsheet":
-			url = fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=%s", id, extension[1:])
-		case "application/vnd.google-apps.presentation":
-			url = fmt.Sprintf("https://docs.google.com/presentation/d/%s/export/%s", id, extension[1:])
-		}
-	}
+	url := info.ExportLinks[mediaType]
 	baseObject := f.newBaseObject(remote+extension, info)
 	baseObject.bytes = -1
 	baseObject.mimeType = exportMimeType
@@ -2038,10 +2045,10 @@ func (f *Fs) createFileInfo(ctx context.Context, remote string, modTime time.Tim
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	exisitingObj, err := f.NewObject(ctx, src.Remote())
+	existingObj, err := f.NewObject(ctx, src.Remote())
 	switch err {
 	case nil:
-		return exisitingObj, exisitingObj.Update(ctx, in, src, options...)
+		return existingObj, existingObj.Update(ctx, in, src, options...)
 	case fs.ErrorObjectNotFound:
 		// Not found so create it
 		return f.PutUnchecked(ctx, in, src, options...)
@@ -2972,6 +2979,38 @@ func (f *Fs) unTrashDir(ctx context.Context, dir string, recurse bool) (r unTras
 	return f.unTrash(ctx, dir, directoryID, true)
 }
 
+// copy file with id to dest
+func (f *Fs) copyID(ctx context.Context, id, dest string) (err error) {
+	info, err := f.getFile(id, f.fileFields)
+	if err != nil {
+		return errors.Wrap(err, "couldn't find id")
+	}
+	if info.MimeType == driveFolderType {
+		return errors.Errorf("can't copy directory use: rclone copy --drive-root-folder-id %s %s %s", id, fs.ConfigString(f), dest)
+	}
+	info.Name = f.opt.Enc.ToStandardName(info.Name)
+	o, err := f.newObjectWithInfo(info.Name, info)
+	if err != nil {
+		return err
+	}
+	destDir, destLeaf, err := fspath.Split(dest)
+	if err != nil {
+		return err
+	}
+	if destLeaf == "" {
+		destLeaf = info.Name
+	}
+	dstFs, err := cache.Get(destDir)
+	if err != nil {
+		return err
+	}
+	_, err = operations.Copy(ctx, dstFs, nil, destLeaf, o)
+	if err != nil {
+		return errors.Wrap(err, "copy failed")
+	}
+	return nil
+}
+
 var commandHelp = []fs.CommandHelp{{
 	Name:  "get",
 	Short: "Get command for fetching the drive config parameters",
@@ -3072,6 +3111,29 @@ Result:
         "Errors": 0
     }
 `,
+}, {
+	Name:  "copyid",
+	Short: "Copy files by ID",
+	Long: `This command copies files by ID
+
+Usage:
+
+    rclone backend copyid drive: ID path
+    rclone backend copyid drive: ID1 path1 ID2 path2
+
+It copies the drive file with ID given to the path (an rclone path which
+will be passed internally to rclone copyto). The ID and path pairs can be
+repeated.
+
+The path should end with a / to indicate copy the file as named to
+this directory. If it doesn't end with a / then the last path
+component will be used as the file name.
+
+If the destination is a drive backend then server side copying will be
+attempted if possible.
+
+Use the -i flag to see what would be copied before copying.
+`,
 }}
 
 // Command the backend to run a named command
@@ -3143,6 +3205,19 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			dir = arg[0]
 		}
 		return f.unTrashDir(ctx, dir, true)
+	case "copyid":
+		if len(arg)%2 != 0 {
+			return nil, errors.New("need an even number of arguments")
+		}
+		for len(arg) > 0 {
+			id, dest := arg[0], arg[1]
+			arg = arg[2:]
+			err = f.copyID(ctx, id, dest)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed copying %q to %q", id, dest)
+			}
+		}
+		return nil, nil
 	default:
 		return nil, fs.ErrorCommandNotFound
 	}

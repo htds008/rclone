@@ -72,8 +72,16 @@ func (tm *transferMap) _sortedSlice() []*Transfer {
 	for _, tr := range tm.items {
 		s = append(s, tr)
 	}
+	// sort by time first and if equal by name.  Note that the relatively
+	// low time resolution on Windows can cause equal times.
 	sort.Slice(s, func(i, j int) bool {
-		return s[i].startedAt.Before(s[j].startedAt)
+		a, b := s[i], s[j]
+		if a.startedAt.Before(b.startedAt) {
+			return true
+		} else if !a.startedAt.Equal(b.startedAt) {
+			return false
+		}
+		return a.remote < b.remote
 	})
 	return s
 }
@@ -83,7 +91,7 @@ func (tm *transferMap) _sortedSlice() []*Transfer {
 func (tm *transferMap) String(progress *inProgress, exclude *transferMap) string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	strngs := make([]string, 0, len(tm.items))
+	stringList := make([]string, 0, len(tm.items))
 	for _, tr := range tm._sortedSlice() {
 		if exclude != nil {
 			exclude.mu.RLock()
@@ -103,9 +111,9 @@ func (tm *transferMap) String(progress *inProgress, exclude *transferMap) string
 				tm.name,
 			)
 		}
-		strngs = append(strngs, " * "+out)
+		stringList = append(stringList, " * "+out)
 	}
-	return strings.Join(strngs, "\n")
+	return strings.Join(stringList, "\n")
 }
 
 // progress returns total bytes read as well as the size.

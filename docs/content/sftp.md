@@ -52,7 +52,7 @@ Choose a number from below, or type in your own value
  1 / Connect to example.com
    \ "example.com"
 host> example.com
-SSH username, leave blank for current username, ncw
+SSH username, leave blank for current username, $USER
 user> sftpuser
 SSH port, leave blank to use default (22)
 port>
@@ -102,7 +102,7 @@ excess files in the directory.
 The SFTP remote supports three authentication methods:
 
   * Password
-  * Key file
+  * Key file, including certificate signed keys
   * ssh-agent
 
 Key files should be PEM-encoded private key files. For instance `/home/$USER/.ssh/id_rsa`.
@@ -127,6 +127,77 @@ Using an ssh-agent is the only way to load encrypted OpenSSH keys at the moment.
 
 If you set the `--sftp-ask-password` option, rclone will prompt for a
 password when needed and no password has been configured.
+
+If you have a certificate then you can provide the path to the public key that contains the certificate.  For example:
+
+```
+[remote]
+type = sftp
+host = example.com
+user = sftpuser
+key_file = ~/id_rsa
+pubkey_file = ~/id_rsa-cert.pub
+````
+
+If you concatenate a cert with a private key then you can specify the
+merged file in both places.
+
+Note: the cert must come first in the file.  e.g.
+
+```
+cat id_rsa-cert.pub id_rsa > merged_key
+```
+
+### Host key validation ###
+
+By default rclone will not check the server's host key for validation.  This
+can allow an attacker to replace a server with their own and if you use
+password authentication then this can lead to that password being exposed.
+
+Host key matching, using standard `known_hosts` files can be turned on by
+enabling the `known_hosts_file` option.  This can point to the file maintained
+by `OpenSSH` or can point to a unique file.
+
+e.g.
+
+```
+[remote]
+type = sftp
+host = example.com
+user = sftpuser
+pass = 
+known_hosts_file = ~/.ssh/known_hosts
+````
+
+There are some limitations:
+
+* `rclone` will not _manage_ this file for you.  If the key is missing or
+wrong then the connection will be refused.
+* If the server is set up for a certificate host key then the entry in
+the `known_hosts` file _must_ be the `@cert-authority` entry for the CA
+* Unlike `OpenSSH`, the libraries used by `rclone` do not permit (at time
+of writing) multiple host keys to be listed for a server.  Only the first
+entry is used.
+
+If the host key provided by the server does not match the one in the
+file (or is missing) then the connection will be aborted and an error
+returned such as
+
+    NewFs: couldn't connect SSH: ssh: handshake failed: knownhosts: key mismatch
+
+or
+
+    NewFs: couldn't connect SSH: ssh: handshake failed: knownhosts: key is unknown
+
+If you see an error such as
+
+    NewFs: couldn't connect SSH: ssh: handshake failed: ssh: no authorities for hostname: example.com:22
+
+then it is likely the server has presented a CA signed host certificate
+and you will need to add the appropriate `@cert-authority` entry.
+
+The `known_hosts_file` setting can be set during `rclone config` as an
+advanced option.
 
 ### ssh-agent on macOS ###
 
@@ -172,7 +243,7 @@ SSH host to connect to
 
 #### --sftp-user
 
-SSH username, leave blank for current username, ncw
+SSH username, leave blank for current username, $USER
 
 - Config:      user
 - Env Var:     RCLONE_SFTP_USER
@@ -192,6 +263,8 @@ SSH port, leave blank to use default (22)
 
 SSH password, leave blank to use ssh-agent.
 
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
+
 - Config:      pass
 - Env Var:     RCLONE_SFTP_PASS
 - Type:        string
@@ -210,6 +283,9 @@ Raw PEM-encoded private key, If specified, will override key_file parameter.
 
 Path to PEM-encoded private key file, leave blank or set key-use-agent to use ssh-agent.
 
+Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
+
+
 - Config:      key_file
 - Env Var:     RCLONE_SFTP_KEY_FILE
 - Type:        string
@@ -222,8 +298,24 @@ The passphrase to decrypt the PEM-encoded private key file.
 Only PEM encrypted key files (old OpenSSH format) are supported. Encrypted keys
 in the new OpenSSH format can't be used.
 
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
+
 - Config:      key_file_pass
 - Env Var:     RCLONE_SFTP_KEY_FILE_PASS
+- Type:        string
+- Default:     ""
+
+#### --sftp-pubkey-file
+
+Optional path to public key file.
+
+Set this if you have a signed certificate you want to use for authentication.
+
+Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
+
+
+- Config:      pubkey_file
+- Env Var:     RCLONE_SFTP_PUBKEY_FILE
 - Type:        string
 - Default:     ""
 
@@ -279,6 +371,23 @@ Leave blank or set to false to enable hashing (recommended), set to true to disa
 
 Here are the advanced options specific to sftp (SSH/SFTP Connection).
 
+#### --sftp-known-hosts-file
+
+Optional path to known_hosts file.
+
+Set this value to enable server host key validation.
+
+Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
+
+
+- Config:      known_hosts_file
+- Env Var:     RCLONE_SFTP_KNOWN_HOSTS_FILE
+- Type:        string
+- Default:     ""
+- Examples:
+    - "~/.ssh/known_hosts"
+        - Use OpenSSH's known_hosts file
+
 #### --sftp-ask-password
 
 Allow asking for SFTP password when needed.
@@ -302,11 +411,11 @@ different. This issue affects among others Synology NAS boxes.
 
 Shared folders can be found in directories representing volumes
 
-    rclone sync -i /home/local/directory remote:/directory --ssh-path-override /volume2/directory
+    rclone sync /home/local/directory remote:/directory --ssh-path-override /volume2/directory
 
 Home directory can be found in a shared folder called "home"
 
-    rclone sync -i /home/local/directory remote:/home/directory --ssh-path-override /volume1/homes/USER/directory
+    rclone sync /home/local/directory remote:/home/directory --ssh-path-override /volume1/homes/USER/directory
 
 - Config:      path_override
 - Env Var:     RCLONE_SFTP_PATH_OVERRIDE
@@ -348,6 +457,26 @@ Set to skip any symlinks and any other non regular files.
 - Env Var:     RCLONE_SFTP_SKIP_LINKS
 - Type:        bool
 - Default:     false
+
+#### --sftp-subsystem
+
+Specifies the SSH2 subsystem on the remote host.
+
+- Config:      subsystem
+- Env Var:     RCLONE_SFTP_SUBSYSTEM
+- Type:        string
+- Default:     "sftp"
+
+#### --sftp-server-command
+
+Specifies the path or command to run a sftp server on the remote host.
+
+The subsystem option is ignored when server_command is defined.
+
+- Config:      server_command
+- Env Var:     RCLONE_SFTP_SERVER_COMMAND
+- Type:        string
+- Default:     ""
 
 {{< rem autogenerated options stop >}}
 

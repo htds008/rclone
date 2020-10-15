@@ -27,8 +27,8 @@ Note that the web interface may refer to this token as a JottaCli token.
 ### Legacy Setup
 
 If you are using one of the whitelabel versions (Elgiganten, Com Hem Cloud) you may not have the option
-to generate a CLI token. In this case you'll have to use the legacy authentification. To to this select
-yes when the setup asks for legacy authentification and enter your username and password.
+to generate a CLI token. In this case you'll have to use the legacy authentication. To to this select
+yes when the setup asks for legacy authentication and enter your username and password.
 The rest of the setup is identical to the default setup.
 
 Here is an example of how to make a remote called `remote` with the default setup.  First run:
@@ -59,7 +59,7 @@ y) Yes
 n) No
 y/n> n
 Remote config
-Use legacy authentification?.
+Use legacy authentication?.
 This is only required for certain whitelabel versions of Jottacloud and not recommended for normal users.
 y) Yes
 n) No (default)
@@ -148,8 +148,13 @@ flag.
 Note that Jottacloud requires the MD5 hash before upload so if the
 source does not have an MD5 checksum then the file will be cached
 temporarily on disk (wherever the `TMPDIR` environment variable points
-to) before it is uploaded.  Small files will be cached in memory - see
+to) before it is uploaded. Small files will be cached in memory - see
 the [--jottacloud-md5-memory-limit](#jottacloud-md5-memory-limit) flag.
+When uploading from local disk the source checksum is always available,
+so this does not apply. Starting with rclone version 1.52 the same is
+true for crypted remotes (in older versions the crypt backend would not
+calculate hashes for uploads from local disk, so the Jottacloud
+backend had to do it as described above).
 
 #### Restricted filename characters
 
@@ -217,16 +222,6 @@ Delete files permanently rather than putting them into the trash.
 
 - Config:      hard_delete
 - Env Var:     RCLONE_JOTTACLOUD_HARD_DELETE
-- Type:        bool
-- Default:     false
-
-#### --jottacloud-unlink
-
-Remove existing public link to file/folder with link command rather than creating.
-Default is false, meaning link command will create or retrieve public link.
-
-- Config:      unlink
-- Env Var:     RCLONE_JOTTACLOUD_UNLINK
 - Type:        bool
 - Default:     false
 

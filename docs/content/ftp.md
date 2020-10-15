@@ -48,7 +48,7 @@ Choose a number from below, or type in your own value
  1 / Connect to ftp.example.com
    \ "ftp.example.com"
 host> ftp.example.com
-FTP username, leave blank for current username, ncw
+FTP username, leave blank for current username, $USER
 Enter a string value. Press Enter for the default ("").
 user> 
 FTP port, leave blank to use default (21)
@@ -179,6 +179,8 @@ FTP port, leave blank to use default (21)
 
 FTP password
 
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
+
 - Config:      pass
 - Env Var:     RCLONE_FTP_PASS
 - Type:        string
@@ -186,8 +188,7 @@ FTP password
 
 #### --ftp-tls
 
-Use FTP over TLS (Implicit)
-
+Use FTPS over TLS (Implicit)
 When using implicit FTP over TLS the client will connect using TLS
 right from the start, which in turn breaks the compatibility with
 non-TLS-aware servers. This is usually served over port 990 rather
@@ -201,13 +202,12 @@ than port 21. Cannot be used in combination with explicit FTP.
 #### --ftp-explicit-tls
 
 Use FTP over TLS (Explicit)
-
 When using explicit FTP over TLS the client explicitly request
 security from the server in order to upgrade a plain text connection
 to an encrypted one. Cannot be used in combination with implicit FTP.
 
 - Config:      explicit_tls
-- Env Var:     RCLONE_FTP_TLS
+- Env Var:     RCLONE_FTP_EXPLICIT_TLS
 - Type:        bool
 - Default:     false
 

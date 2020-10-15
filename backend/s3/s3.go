@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
@@ -58,7 +59,7 @@ import (
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "s3",
-		Description: "Amazon S3 Compliant Storage Provider (AWS, Alibaba, Ceph, Digital Ocean, Dreamhost, IBM COS, Minio, etc)",
+		Description: "Amazon S3 Compliant Storage Provider (AWS, Alibaba, Ceph, Digital Ocean, Dreamhost, IBM COS, Minio, Tencent COS, etc)",
 		NewFs:       NewFs,
 		CommandHelp: commandHelp,
 		Options: []fs.Option{{
@@ -95,6 +96,9 @@ func init() {
 				Value: "StackPath",
 				Help:  "StackPath Object Storage",
 			}, {
+				Value: "TencentCOS",
+				Help:  "Tencent Cloud Object Storage (COS)",
+			}, {
 				Value: "Wasabi",
 				Help:  "Wasabi Object Storage",
 			}, {
@@ -119,6 +123,9 @@ func init() {
 			Name: "secret_access_key",
 			Help: "AWS Secret Access Key (password)\nLeave blank for anonymous access or runtime credentials.",
 		}, {
+			// References:
+			// 1. https://docs.aws.amazon.com/general/latest/gr/rande.html
+			// 2. https://docs.aws.amazon.com/general/latest/gr/s3.html
 			Name:     "region",
 			Help:     "Region to connect to.",
 			Provider: "AWS",
@@ -129,11 +136,11 @@ func init() {
 				Value: "us-east-2",
 				Help:  "US East (Ohio) Region\nNeeds location constraint us-east-2.",
 			}, {
-				Value: "us-west-2",
-				Help:  "US West (Oregon) Region\nNeeds location constraint us-west-2.",
-			}, {
 				Value: "us-west-1",
 				Help:  "US West (Northern California) Region\nNeeds location constraint us-west-1.",
+			}, {
+				Value: "us-west-2",
+				Help:  "US West (Oregon) Region\nNeeds location constraint us-west-2.",
 			}, {
 				Value: "ca-central-1",
 				Help:  "Canada (Central) Region\nNeeds location constraint ca-central-1.",
@@ -144,8 +151,14 @@ func init() {
 				Value: "eu-west-2",
 				Help:  "EU (London) Region\nNeeds location constraint eu-west-2.",
 			}, {
+				Value: "eu-west-3",
+				Help:  "EU (Paris) Region\nNeeds location constraint eu-west-3.",
+			}, {
 				Value: "eu-north-1",
 				Help:  "EU (Stockholm) Region\nNeeds location constraint eu-north-1.",
+			}, {
+				Value: "eu-south-1",
+				Help:  "EU (Milan) Region\nNeeds location constraint eu-south-1.",
 			}, {
 				Value: "eu-central-1",
 				Help:  "EU (Frankfurt) Region\nNeeds location constraint eu-central-1.",
@@ -162,14 +175,35 @@ func init() {
 				Value: "ap-northeast-2",
 				Help:  "Asia Pacific (Seoul)\nNeeds location constraint ap-northeast-2.",
 			}, {
+				Value: "ap-northeast-3",
+				Help:  "Asia Pacific (Osaka-Local)\nNeeds location constraint ap-northeast-3.",
+			}, {
 				Value: "ap-south-1",
 				Help:  "Asia Pacific (Mumbai)\nNeeds location constraint ap-south-1.",
 			}, {
 				Value: "ap-east-1",
-				Help:  "Asia Patific (Hong Kong) Region\nNeeds location constraint ap-east-1.",
+				Help:  "Asia Pacific (Hong Kong) Region\nNeeds location constraint ap-east-1.",
 			}, {
 				Value: "sa-east-1",
 				Help:  "South America (Sao Paulo) Region\nNeeds location constraint sa-east-1.",
+			}, {
+				Value: "me-south-1",
+				Help:  "Middle East (Bahrain) Region\nNeeds location constraint me-south-1.",
+			}, {
+				Value: "af-south-1",
+				Help:  "Africa (Cape Town) Region\nNeeds location constraint af-south-1.",
+			}, {
+				Value: "cn-north-1",
+				Help:  "China (Beijing) Region\nNeeds location constraint cn-north-1.",
+			}, {
+				Value: "cn-northwest-1",
+				Help:  "China (Ningxia) Region\nNeeds location constraint cn-northwest-1.",
+			}, {
+				Value: "us-gov-east-1",
+				Help:  "AWS GovCloud (US-East) Region\nNeeds location constraint us-gov-east-1.",
+			}, {
+				Value: "us-gov-west-1",
+				Help:  "AWS GovCloud (US) Region\nNeeds location constraint us-gov-west-1.",
 			}},
 		}, {
 			Name:     "region",
@@ -185,7 +219,7 @@ func init() {
 		}, {
 			Name:     "region",
 			Help:     "Region to connect to.\nLeave blank if you are using an S3 clone and you don't have a region.",
-			Provider: "!AWS,Alibaba,Scaleway",
+			Provider: "!AWS,Alibaba,Scaleway,TencentCOS",
 			Examples: []fs.OptionExample{{
 				Value: "",
 				Help:  "Use this if unsure. Will use v4 signatures and an empty region.",
@@ -477,9 +511,72 @@ func init() {
 				Help:  "EU Endpoint",
 			}},
 		}, {
+			// cos endpoints: https://intl.cloud.tencent.com/document/product/436/6224
+			Name:     "endpoint",
+			Help:     "Endpoint for Tencent COS API.",
+			Provider: "TencentCOS",
+			Examples: []fs.OptionExample{{
+				Value: "cos.ap-beijing.myqcloud.com",
+				Help:  "Beijing Region.",
+			}, {
+				Value: "cos.ap-nanjing.myqcloud.com",
+				Help:  "Nanjing Region.",
+			}, {
+				Value: "cos.ap-shanghai.myqcloud.com",
+				Help:  "Shanghai Region.",
+			}, {
+				Value: "cos.ap-guangzhou.myqcloud.com",
+				Help:  "Guangzhou Region.",
+			}, {
+				Value: "cos.ap-nanjing.myqcloud.com",
+				Help:  "Nanjing Region.",
+			}, {
+				Value: "cos.ap-chengdu.myqcloud.com",
+				Help:  "Chengdu Region.",
+			}, {
+				Value: "cos.ap-chongqing.myqcloud.com",
+				Help:  "Chongqing Region.",
+			}, {
+				Value: "cos.ap-hongkong.myqcloud.com",
+				Help:  "Hong Kong (China) Region.",
+			}, {
+				Value: "cos.ap-singapore.myqcloud.com",
+				Help:  "Singapore Region.",
+			}, {
+				Value: "cos.ap-mumbai.myqcloud.com",
+				Help:  "Mumbai Region.",
+			}, {
+				Value: "cos.ap-seoul.myqcloud.com",
+				Help:  "Seoul Region.",
+			}, {
+				Value: "cos.ap-bangkok.myqcloud.com",
+				Help:  "Bangkok Region.",
+			}, {
+				Value: "cos.ap-tokyo.myqcloud.com",
+				Help:  "Tokyo Region.",
+			}, {
+				Value: "cos.na-siliconvalley.myqcloud.com",
+				Help:  "Silicon Valley Region.",
+			}, {
+				Value: "cos.na-ashburn.myqcloud.com",
+				Help:  "Virginia Region.",
+			}, {
+				Value: "cos.na-toronto.myqcloud.com",
+				Help:  "Toronto Region.",
+			}, {
+				Value: "cos.eu-frankfurt.myqcloud.com",
+				Help:  "Frankfurt Region.",
+			}, {
+				Value: "cos.eu-moscow.myqcloud.com",
+				Help:  "Moscow Region.",
+			}, {
+				Value: "cos.accelerate.myqcloud.com",
+				Help:  "Use Tencent COS Accelerate Endpoint.",
+			}},
+		}, {
 			Name:     "endpoint",
 			Help:     "Endpoint for S3 API.\nRequired when using an S3 clone.",
-			Provider: "!AWS,IBMCOS,Alibaba,Scaleway,StackPath",
+			Provider: "!AWS,IBMCOS,TencentCOS,Alibaba,Scaleway,StackPath",
 			Examples: []fs.OptionExample{{
 				Value:    "objects-us-east-1.dream.io",
 				Help:     "Dream Objects endpoint",
@@ -520,11 +617,11 @@ func init() {
 				Value: "us-east-2",
 				Help:  "US East (Ohio) Region.",
 			}, {
-				Value: "us-west-2",
-				Help:  "US West (Oregon) Region.",
-			}, {
 				Value: "us-west-1",
 				Help:  "US West (Northern California) Region.",
+			}, {
+				Value: "us-west-2",
+				Help:  "US West (Oregon) Region.",
 			}, {
 				Value: "ca-central-1",
 				Help:  "Canada (Central) Region.",
@@ -535,8 +632,14 @@ func init() {
 				Value: "eu-west-2",
 				Help:  "EU (London) Region.",
 			}, {
+				Value: "eu-west-3",
+				Help:  "EU (Paris) Region.",
+			}, {
 				Value: "eu-north-1",
 				Help:  "EU (Stockholm) Region.",
+			}, {
+				Value: "eu-south-1",
+				Help:  "EU (Milan) Region.",
 			}, {
 				Value: "EU",
 				Help:  "EU Region.",
@@ -551,16 +654,37 @@ func init() {
 				Help:  "Asia Pacific (Tokyo) Region.",
 			}, {
 				Value: "ap-northeast-2",
-				Help:  "Asia Pacific (Seoul)",
+				Help:  "Asia Pacific (Seoul) Region.",
+			}, {
+				Value: "ap-northeast-3",
+				Help:  "Asia Pacific (Osaka-Local) Region.",
 			}, {
 				Value: "ap-south-1",
-				Help:  "Asia Pacific (Mumbai)",
+				Help:  "Asia Pacific (Mumbai) Region.",
 			}, {
 				Value: "ap-east-1",
-				Help:  "Asia Pacific (Hong Kong)",
+				Help:  "Asia Pacific (Hong Kong) Region.",
 			}, {
 				Value: "sa-east-1",
 				Help:  "South America (Sao Paulo) Region.",
+			}, {
+				Value: "me-south-1",
+				Help:  "Middle East (Bahrain) Region.",
+			}, {
+				Value: "af-south-1",
+				Help:  "Africa (Cape Town) Region.",
+			}, {
+				Value: "cn-north-1",
+				Help:  "China (Beijing) Region",
+			}, {
+				Value: "cn-northwest-1",
+				Help:  "China (Ningxia) Region.",
+			}, {
+				Value: "us-gov-east-1",
+				Help:  "AWS GovCloud (US-East) Region.",
+			}, {
+				Value: "us-gov-west-1",
+				Help:  "AWS GovCloud (US) Region.",
 			}},
 		}, {
 			Name:     "location_constraint",
@@ -666,7 +790,7 @@ func init() {
 		}, {
 			Name:     "location_constraint",
 			Help:     "Location constraint - must be set to match the Region.\nLeave blank if not sure. Used when creating buckets only.",
-			Provider: "!AWS,IBMCOS,Alibaba,Scaleway,StackPath",
+			Provider: "!AWS,IBMCOS,Alibaba,Scaleway,StackPath,TencentCOS",
 		}, {
 			Name: "acl",
 			Help: `Canned ACL used when creating buckets and storing or copying objects.
@@ -678,9 +802,13 @@ For more info visit https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview
 Note that this ACL is applied when server side copying objects as S3
 doesn't copy the ACL from the source but rather writes a fresh one.`,
 			Examples: []fs.OptionExample{{
+				Value:    "default",
+				Help:     "Owner gets Full_CONTROL. No one else has access rights (default).",
+				Provider: "TencentCOS",
+			}, {
 				Value:    "private",
 				Help:     "Owner gets FULL_CONTROL. No one else has access rights (default).",
-				Provider: "!IBMCOS",
+				Provider: "!IBMCOS,TencentCOS",
 			}, {
 				Value:    "public-read",
 				Help:     "Owner gets FULL_CONTROL. The AllUsers group gets READ access.",
@@ -843,6 +971,24 @@ isn't set then "acl" is used instead.`,
 				Help:  "Infrequent access storage mode.",
 			}},
 		}, {
+			// Mapping from here: https://intl.cloud.tencent.com/document/product/436/30925
+			Name:     "storage_class",
+			Help:     "The storage class to use when storing new objects in Tencent COS.",
+			Provider: "TencentCOS",
+			Examples: []fs.OptionExample{{
+				Value: "",
+				Help:  "Default",
+			}, {
+				Value: "STANDARD",
+				Help:  "Standard storage class",
+			}, {
+				Value: "ARCHIVE",
+				Help:  "Archive storage mode.",
+			}, {
+				Value: "STANDARD_IA",
+				Help:  "Infrequent access storage mode.",
+			}},
+		}, {
 			// Mapping from here: https://www.scaleway.com/en/docs/object-storage-glacier/#-Scaleway-Storage-Classes
 			Name:     "storage_class",
 			Help:     "The storage class to use when storing new objects in S3.",
@@ -975,7 +1121,7 @@ if false then rclone will use virtual path style. See [the AWS S3
 docs](https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingBucket.html#access-bucket-intro)
 for more info.
 
-Some providers (eg AWS, Aliyun OSS or Netease COS) require this set to
+Some providers (eg AWS, Aliyun OSS, Netease COS or Tencent COS) require this set to
 false - rclone will do this automatically based on the provider
 setting.`,
 			Default:  true,
@@ -1058,16 +1204,31 @@ This option controls how often unused buffers will be removed from the pool.`,
 			Default:  memoryPoolUseMmap,
 			Advanced: true,
 			Help:     `Whether to use mmap buffers in internal memory pool.`,
+		}, {
+			Name:     "disable_http2",
+			Default:  false,
+			Advanced: true,
+			Help: `Disable usage of http2 for S3 backends
+
+There is currently an unsolved issue with the s3 (specifically minio) backend
+and HTTP/2.  HTTP/2 is enabled by default for the s3 backend but can be
+disabled here.  When the issue is solved this flag will be removed.
+
+See: https://github.com/rclone/rclone/issues/4673, https://github.com/rclone/rclone/issues/3631
+
+`,
 		},
 		}})
 }
 
 // Constants
 const (
-	metaMtime           = "Mtime"                // the meta key to store mtime in - eg X-Amz-Meta-Mtime
-	metaMD5Hash         = "Md5chksum"            // the meta key to store md5hash in
-	maxSizeForCopy      = 5 * 1024 * 1024 * 1024 // The maximum size of object we can COPY
-	maxUploadParts      = 10000                  // maximum allowed number of parts in a multi-part upload
+	metaMtime   = "Mtime"     // the meta key to store mtime in - eg X-Amz-Meta-Mtime
+	metaMD5Hash = "Md5chksum" // the meta key to store md5hash in
+	// The maximum size of object we can COPY - this should be 5GiB but is < 5GB for b2 compatibility
+	// See https://forum.rclone.org/t/copying-files-within-a-b2-bucket/16680/76
+	maxSizeForCopy      = 4768 * 1024 * 1024
+	maxUploadParts      = 10000 // maximum allowed number of parts in a multi-part upload
 	minChunkSize        = fs.SizeSuffix(1024 * 1024 * 5)
 	defaultUploadCutoff = fs.SizeSuffix(200 * 1024 * 1024)
 	maxUploadCutoff     = fs.SizeSuffix(5 * 1024 * 1024 * 1024)
@@ -1113,6 +1274,7 @@ type Options struct {
 	Enc                   encoder.MultiEncoder `config:"encoding"`
 	MemoryPoolFlushTime   fs.Duration          `config:"memory_pool_flush_time"`
 	MemoryPoolUseMmap     bool                 `config:"memory_pool_use_mmap"`
+	DisableHTTP2          bool                 `config:"disable_http2"`
 }
 
 // Fs represents a remote s3 server
@@ -1234,6 +1396,19 @@ func (o *Object) split() (bucket, bucketPath string) {
 	return o.fs.split(o.remote)
 }
 
+// getClient makes an http client according to the options
+func getClient(opt *Options) *http.Client {
+	// TODO: Do we need cookies too?
+	t := fshttp.NewTransportCustom(fs.Config, func(t *http.Transport) {
+		if opt.DisableHTTP2 {
+			t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		}
+	})
+	return &http.Client{
+		Transport: t,
+	}
+}
+
 // s3Connection makes a connection to s3
 func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 	// Make the auth
@@ -1244,6 +1419,7 @@ func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 	}
 
 	lowTimeoutClient := &http.Client{Timeout: 1 * time.Second} // low timeout to ec2 metadata service
+
 	def := defaults.Get()
 	def.Config.HTTPClient = lowTimeoutClient
 
@@ -1303,7 +1479,7 @@ func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 	if opt.Region == "" {
 		opt.Region = "us-east-1"
 	}
-	if opt.Provider == "AWS" || opt.Provider == "Alibaba" || opt.Provider == "Netease" || opt.Provider == "Scaleway" || opt.UseAccelerateEndpoint {
+	if opt.Provider == "AWS" || opt.Provider == "Alibaba" || opt.Provider == "Netease" || opt.Provider == "Scaleway" || opt.Provider == "TencentCOS" || opt.UseAccelerateEndpoint {
 		opt.ForcePathStyle = false
 	}
 	if opt.Provider == "Scaleway" && opt.MaxUploadParts > 1000 {
@@ -1312,7 +1488,7 @@ func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 	awsConfig := aws.NewConfig().
 		WithMaxRetries(0). // Rely on rclone's retry logic
 		WithCredentials(cred).
-		WithHTTPClient(fshttp.NewClient(fs.Config)).
+		WithHTTPClient(getClient(opt)).
 		WithS3ForcePathStyle(opt.ForcePathStyle).
 		WithS3UseAccelerate(opt.UseAccelerateEndpoint).
 		WithS3UsEast1RegionalEndpoint(endpoints.RegionalS3UsEast1Endpoint)
@@ -1426,7 +1602,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		ses:   ses,
 		pacer: fs.NewPacer(pacer.NewS3(pacer.MinSleep(minSleep))),
 		cache: bucket.NewCache(),
-		srv:   fshttp.NewClient(fs.Config),
+		srv:   getClient(opt),
 		pool: pool.New(
 			time.Duration(opt.MemoryPoolFlushTime),
 			int(opt.ChunkSize),
@@ -1585,7 +1761,7 @@ func (f *Fs) list(ctx context.Context, bucket, directory, prefix string, addBuck
 	//
 	// So we enable only on providers we know supports it properly, all others can retry when a
 	// XML Syntax error is detected.
-	var urlEncodeListings = (f.opt.Provider == "AWS" || f.opt.Provider == "Wasabi" || f.opt.Provider == "Alibaba" || f.opt.Provider == "Minio")
+	var urlEncodeListings = (f.opt.Provider == "AWS" || f.opt.Provider == "Wasabi" || f.opt.Provider == "Alibaba" || f.opt.Provider == "Minio" || f.opt.Provider == "TencentCOS")
 	for {
 		// FIXME need to implement ALL loop
 		req := s3.ListObjectsInput{
@@ -1967,7 +2143,7 @@ func pathEscape(s string) string {
 //
 // It adds the boiler plate to the req passed in and calls the s3
 // method
-func (f *Fs) copy(ctx context.Context, req *s3.CopyObjectInput, dstBucket, dstPath, srcBucket, srcPath string, srcSize int64) error {
+func (f *Fs) copy(ctx context.Context, req *s3.CopyObjectInput, dstBucket, dstPath, srcBucket, srcPath string, src *Object) error {
 	req.Bucket = &dstBucket
 	req.ACL = &f.opt.ACL
 	req.Key = &dstPath
@@ -1983,8 +2159,8 @@ func (f *Fs) copy(ctx context.Context, req *s3.CopyObjectInput, dstBucket, dstPa
 		req.StorageClass = &f.opt.StorageClass
 	}
 
-	if srcSize >= int64(f.opt.CopyCutoff) {
-		return f.copyMultipart(ctx, req, dstBucket, dstPath, srcBucket, srcPath, srcSize)
+	if src.bytes >= int64(f.opt.CopyCutoff) {
+		return f.copyMultipart(ctx, req, dstBucket, dstPath, srcBucket, srcPath, src)
 	}
 	return f.pacer.Call(func() (bool, error) {
 		_, err := f.c.CopyObjectWithContext(ctx, req)
@@ -2005,14 +2181,33 @@ func calculateRange(partSize, partIndex, numParts, totalSize int64) string {
 	return fmt.Sprintf("bytes=%v-%v", start, ends)
 }
 
-func (f *Fs) copyMultipart(ctx context.Context, req *s3.CopyObjectInput, dstBucket, dstPath, srcBucket, srcPath string, srcSize int64) (err error) {
+func (f *Fs) copyMultipart(ctx context.Context, copyReq *s3.CopyObjectInput, dstBucket, dstPath, srcBucket, srcPath string, src *Object) (err error) {
+	info, err := src.headObject(ctx)
+	if err != nil {
+		return err
+	}
+
+	req := &s3.CreateMultipartUploadInput{}
+
+	// Fill in the request from the head info
+	structs.SetFrom(req, info)
+
+	// If copy metadata was set then set the Metadata to that read
+	// from the head request
+	if aws.StringValue(copyReq.MetadataDirective) == s3.MetadataDirectiveCopy {
+		copyReq.Metadata = info.Metadata
+	}
+
+	// Overwrite any from the copyReq
+	structs.SetFrom(req, copyReq)
+
+	req.Bucket = &dstBucket
+	req.Key = &dstPath
+
 	var cout *s3.CreateMultipartUploadOutput
 	if err := f.pacer.Call(func() (bool, error) {
 		var err error
-		cout, err = f.c.CreateMultipartUploadWithContext(ctx, &s3.CreateMultipartUploadInput{
-			Bucket: &dstBucket,
-			Key:    &dstPath,
-		})
+		cout, err = f.c.CreateMultipartUploadWithContext(ctx, req)
 		return f.shouldRetry(err)
 	}); err != nil {
 		return err
@@ -2021,7 +2216,7 @@ func (f *Fs) copyMultipart(ctx context.Context, req *s3.CopyObjectInput, dstBuck
 
 	defer atexit.OnError(&err, func() {
 		// Try to abort the upload, but ignore the error.
-		fs.Debugf(nil, "Cancelling multipart copy")
+		fs.Debugf(src, "Cancelling multipart copy")
 		_ = f.pacer.Call(func() (bool, error) {
 			_, err := f.c.AbortMultipartUploadWithContext(context.Background(), &s3.AbortMultipartUploadInput{
 				Bucket:       &dstBucket,
@@ -2033,33 +2228,23 @@ func (f *Fs) copyMultipart(ctx context.Context, req *s3.CopyObjectInput, dstBuck
 		})
 	})()
 
+	srcSize := src.bytes
 	partSize := int64(f.opt.CopyCutoff)
 	numParts := (srcSize-1)/partSize + 1
+
+	fs.Debugf(src, "Starting  multipart copy with %d parts", numParts)
 
 	var parts []*s3.CompletedPart
 	for partNum := int64(1); partNum <= numParts; partNum++ {
 		if err := f.pacer.Call(func() (bool, error) {
 			partNum := partNum
-			uploadPartReq := &s3.UploadPartCopyInput{
-				Bucket:          &dstBucket,
-				Key:             &dstPath,
-				PartNumber:      &partNum,
-				UploadId:        uid,
-				CopySourceRange: aws.String(calculateRange(partSize, partNum-1, numParts, srcSize)),
-				// Args copy from req
-				CopySource:                     req.CopySource,
-				CopySourceIfMatch:              req.CopySourceIfMatch,
-				CopySourceIfModifiedSince:      req.CopySourceIfModifiedSince,
-				CopySourceIfNoneMatch:          req.CopySourceIfNoneMatch,
-				CopySourceIfUnmodifiedSince:    req.CopySourceIfUnmodifiedSince,
-				CopySourceSSECustomerAlgorithm: req.CopySourceSSECustomerAlgorithm,
-				CopySourceSSECustomerKey:       req.CopySourceSSECustomerKey,
-				CopySourceSSECustomerKeyMD5:    req.CopySourceSSECustomerKeyMD5,
-				RequestPayer:                   req.RequestPayer,
-				SSECustomerAlgorithm:           req.SSECustomerAlgorithm,
-				SSECustomerKey:                 req.SSECustomerKey,
-				SSECustomerKeyMD5:              req.SSECustomerKeyMD5,
-			}
+			uploadPartReq := &s3.UploadPartCopyInput{}
+			structs.SetFrom(uploadPartReq, copyReq)
+			uploadPartReq.Bucket = &dstBucket
+			uploadPartReq.Key = &dstPath
+			uploadPartReq.PartNumber = &partNum
+			uploadPartReq.UploadId = uid
+			uploadPartReq.CopySourceRange = aws.String(calculateRange(partSize, partNum-1, numParts, srcSize))
 			uout, err := f.c.UploadPartCopyWithContext(ctx, uploadPartReq)
 			if err != nil {
 				return f.shouldRetry(err)
@@ -2112,7 +2297,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	req := s3.CopyObjectInput{
 		MetadataDirective: aws.String(s3.MetadataDirectiveCopy),
 	}
-	err = f.copy(ctx, &req, dstBucket, dstPath, srcBucket, srcPath, srcObj.Size())
+	err = f.copy(ctx, &req, dstBucket, dstPath, srcBucket, srcPath, srcObj)
 	if err != nil {
 		return nil, err
 	}
@@ -2179,7 +2364,7 @@ All the objects shown will be marked for restore, then
     rclone backend restore --include "*.txt" s3:bucket/path -o priority=Standard
 
 It returns a list of status dictionaries with Remote and Status
-keys. The Status will be OK if it was successfull or an error message
+keys. The Status will be OK if it was successful or an error message
 if not.
 
     [
@@ -2344,7 +2529,7 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 // listMultipartUploads lists all outstanding multipart uploads for (bucket, key)
 //
 // Note that rather lazily we treat key as a prefix so it matches
-// directories and objects. This could suprise the user if they ask
+// directories and objects. This could surprise the user if they ask
 // for "dir" and it returns "dirKey"
 func (f *Fs) listMultipartUploads(ctx context.Context, bucket, key string) (uploads []*s3.MultipartUpload, err error) {
 	var (
@@ -2509,19 +2694,12 @@ func (o *Object) Size() int64 {
 	return o.bytes
 }
 
-// readMetaData gets the metadata if it hasn't already been fetched
-//
-// it also sets the info
-func (o *Object) readMetaData(ctx context.Context) (err error) {
-	if o.meta != nil {
-		return nil
-	}
+func (o *Object) headObject(ctx context.Context) (resp *s3.HeadObjectOutput, err error) {
 	bucket, bucketPath := o.split()
 	req := s3.HeadObjectInput{
 		Bucket: &bucket,
 		Key:    &bucketPath,
 	}
-	var resp *s3.HeadObjectOutput
 	err = o.fs.pacer.Call(func() (bool, error) {
 		var err error
 		resp, err = o.fs.c.HeadObjectWithContext(ctx, &req)
@@ -2530,12 +2708,26 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 	if err != nil {
 		if awsErr, ok := err.(awserr.RequestFailure); ok {
 			if awsErr.StatusCode() == http.StatusNotFound {
-				return fs.ErrorObjectNotFound
+				return nil, fs.ErrorObjectNotFound
 			}
 		}
-		return err
+		return nil, err
 	}
 	o.fs.cache.MarkOK(bucket)
+	return resp, nil
+}
+
+// readMetaData gets the metadata if it hasn't already been fetched
+//
+// it also sets the info
+func (o *Object) readMetaData(ctx context.Context) (err error) {
+	if o.meta != nil {
+		return nil
+	}
+	resp, err := o.headObject(ctx)
+	if err != nil {
+		return err
+	}
 	var size int64
 	// Ignore missing Content-Length assuming it is 0
 	// Some versions of ceph do this due their apache proxies
@@ -2606,7 +2798,7 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 		Metadata:          o.meta,
 		MetadataDirective: aws.String(s3.MetadataDirectiveReplace), // replace metadata with that passed in
 	}
-	return o.fs.copy(ctx, &req, bucket, bucketPath, bucket, bucketPath, o.bytes)
+	return o.fs.copy(ctx, &req, bucket, bucketPath, bucket, bucketPath, o)
 }
 
 // Storable raturns a boolean indicating if this object is storable
@@ -2870,7 +3062,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	// read the md5sum if available
-	// - for non multpart
+	// - for non multipart
 	//    - so we can add a ContentMD5
 	// - for multipart provided checksums aren't disabled
 	//    - so we can add the md5sum in the metadata as metaMD5Hash
@@ -3046,7 +3238,7 @@ func (o *Object) SetTier(tier string) (err error) {
 		MetadataDirective: aws.String(s3.MetadataDirectiveCopy),
 		StorageClass:      aws.String(tier),
 	}
-	err = o.fs.copy(ctx, &req, bucket, bucketPath, bucket, bucketPath, o.bytes)
+	err = o.fs.copy(ctx, &req, bucket, bucketPath, bucket, bucketPath, o)
 	if err != nil {
 		return err
 	}

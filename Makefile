@@ -8,7 +8,8 @@ VERSION := $(shell cat VERSION)
 # Last tag on this branch
 LAST_TAG := $(shell git describe --tags --abbrev=0)
 # Next version
-NEXT_VERSION := $(shell echo $(VERSION) | perl -lpe 's/v//; $$_ += 0.01; $$_ = sprintf("v%.2f.0", $$_)')
+NEXT_VERSION := $(shell echo $(VERSION) | awk -F. -v OFS=. '{print $$1,$$2+1,0}')
+NEXT_PATCH_VERSION := $(shell echo $(VERSION) | awk -F. -v OFS=. '{print $$1,$$2,$$3+1}')
 # If we are working on a release, override branch to master
 ifdef RELEASE_TAG
 	BRANCH := master
@@ -164,6 +165,11 @@ validate_website: website
 tarball:
 	git archive -9 --format=tar.gz --prefix=rclone-$(TAG)/ -o build/rclone-$(TAG).tar.gz $(TAG)
 
+vendorball:
+	go mod vendor
+	tar -zcf build/rclone-$(TAG)-vendor.tar.gz vendor
+	rm -rf vendor
+
 sign_upload:
 	cd build && md5sum rclone-v* | gpg --clearsign > MD5SUMS
 	cd build && sha1sum rclone-v* | gpg --clearsign > SHA1SUMS
@@ -239,7 +245,15 @@ startdev:
 	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(NEXT_VERSION)-DEV\"\n" | gofmt > fs/version.go
 	echo -n "$(NEXT_VERSION)" > docs/layouts/partials/version.html
 	echo "$(NEXT_VERSION)" > VERSION
-	git commit -m "Start $(VERSION)-DEV development" fs/version.go
+	git commit -m "Start $(NEXT_VERSION)-DEV development" fs/version.go VERSION docs/layouts/partials/version.html
+
+startstable:
+	@echo "Version is $(VERSION)"
+	@echo "Next stable version is $(NEXT_PATCH_VERSION)"
+	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(NEXT_PATCH_VERSION)-DEV\"\n" | gofmt > fs/version.go
+	echo -n "$(NEXT_PATCH_VERSION)" > docs/layouts/partials/version.html
+	echo "$(NEXT_PATCH_VERSION)" > VERSION
+	git commit -m "Start $(NEXT_PATCH_VERSION)-DEV development" fs/version.go VERSION docs/layouts/partials/version.html
 
 winzip:
 	zip -9 rclone-$(TAG).zip rclone.exe

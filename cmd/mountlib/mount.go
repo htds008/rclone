@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/okzk/sdnotify"
+	sysdnotify "github.com/iguanesolutions/go-systemd/v5/notify"
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/fs"
@@ -162,7 +162,7 @@ FUSE.
 First set up your remote using ` + "`rclone config`" + `.  Check it works with ` + "`rclone ls`" + ` etc.
 
 You can either run mount in foreground mode or background (daemon) mode. Mount runs in
-foreground mode by default, use the --daemon flag to specify background mode mode.
+foreground mode by default, use the --daemon flag to specify background mode.
 Background mode is only supported on Linux and OSX, you can only run mount in
 foreground mode on Windows.
 
@@ -191,6 +191,9 @@ Stopping the mount manually:
     fusermount -u /path/to/local/mount
     # OS X
     umount /path/to/local/mount
+
+**Note**: As of ` + "`rclone` 1.52.2, `rclone mount`" + ` now requires Go version 1.13
+or newer on some platforms depending on the underlying FUSE library in use.
 
 ### Installing on Windows
 
@@ -333,9 +336,6 @@ With --vfs-read-chunk-size 100M and --vfs-read-chunk-size-limit 0 the following
 parts will be downloaded: 0-100M, 100M-200M, 200M-300M, 300M-400M and so on.
 When --vfs-read-chunk-size-limit 500M is specified, the result would be
 0-100M, 100M-300M, 300M-700M, 700M-1200M, 1200M-1700M and so on.
-
-Chunked reading will only work with --vfs-cache-mode < full, as the file will always
-be copied to the vfs cache before opening with --vfs-cache-mode full.
 ` + vfs.Help,
 		Run: func(command *cobra.Command, args []string) {
 			cmd.CheckArgs(2, 2, command, args)
@@ -448,13 +448,13 @@ func Mount(VFS *vfs.VFS, mountpoint string, mount MountFn, opt *Options) error {
 
 	// Unmount on exit
 	fnHandle := atexit.Register(func() {
+		_ = sysdnotify.Stopping()
 		_ = unmount()
-		_ = sdnotify.Stopping()
 	})
 	defer atexit.Unregister(fnHandle)
 
 	// Notify systemd
-	if err := sdnotify.Ready(); err != nil && err != sdnotify.ErrSdNotifyNoSocket {
+	if err := sysdnotify.Ready(); err != nil {
 		return errors.Wrap(err, "failed to notify systemd")
 	}
 
@@ -479,8 +479,8 @@ waitloop:
 		}
 	}
 
+	_ = sysdnotify.Stopping()
 	_ = unmount()
-	_ = sdnotify.Stopping()
 
 	if err != nil {
 		return errors.Wrap(err, "failed to umount FUSE fs")

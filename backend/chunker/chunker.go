@@ -24,6 +24,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fspath"
@@ -238,15 +239,18 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 		return nil, errors.New("can't point remote at itself - check the value of the remote setting")
 	}
 
-	baseInfo, baseName, basePath, baseConfig, err := fs.ConfigFs(remote)
+	baseName, basePath, err := fspath.Parse(remote)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to parse remote %q to wrap", remote)
 	}
+	if baseName != "" {
+		baseName += ":"
+	}
 	// Look for a file first
 	remotePath := fspath.JoinRootPath(basePath, rpath)
-	baseFs, err := baseInfo.NewFs(baseName, remotePath, baseConfig)
+	baseFs, err := cache.Get(baseName + remotePath)
 	if err != fs.ErrorIsFile && err != nil {
-		return nil, errors.Wrapf(err, "failed to make remote %s:%q to wrap", baseName, remotePath)
+		return nil, errors.Wrapf(err, "failed to make remote %q to wrap", baseName+remotePath)
 	}
 	if !operations.CanServerSideMove(baseFs) {
 		return nil, errors.New("can't use chunker on a backend which doesn't support server side move or copy")
@@ -258,6 +262,7 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 		root: rpath,
 		opt:  *opt,
 	}
+	cache.PinUntilFinalized(f.base, f)
 	f.dirSort = true // processEntries requires that meta Objects prerun data chunks atm.
 
 	if err := f.configure(opt.NameFormat, opt.MetaFormat, opt.HashType); err != nil {
@@ -271,7 +276,7 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 	// (yet can't satisfy fstest.CheckListing, will ignore)
 	if err == nil && !f.useMeta && strings.Contains(rpath, "/") {
 		firstChunkPath := f.makeChunkName(remotePath, 0, "", "")
-		_, testErr := baseInfo.NewFs(baseName, firstChunkPath, baseConfig)
+		_, testErr := cache.Get(baseName + firstChunkPath)
 		if testErr == fs.ErrorIsFile {
 			err = testErr
 		}
@@ -290,6 +295,8 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 		CanHaveEmptyDirectories: true,
 		ServerSideAcrossConfigs: true,
 	}).Fill(f).Mask(baseFs).WrapsFs(f, baseFs)
+
+	f.features.Disable("ListR") // Recursive listing may cause chunker skip files
 
 	return f, err
 }
@@ -953,6 +960,8 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, remote st
 		}
 		info := f.wrapInfo(src, chunkRemote, size)
 
+		// Refill chunkLimit and let basePut repeatedly call chunkingReader.Read()
+		c.chunkLimit = c.chunkSize
 		// TODO: handle range/limit options
 		chunk, errChunk := basePut(ctx, wrapIn, info, options...)
 		if errChunk != nil {
@@ -1161,10 +1170,14 @@ func (c *chunkingReader) updateHashes() {
 func (c *chunkingReader) Read(buf []byte) (bytesRead int, err error) {
 	if c.chunkLimit <= 0 {
 		// Chunk complete - switch to next one.
+		// Note #1:
 		// We might not get here because some remotes (eg. box multi-uploader)
 		// read the specified size exactly and skip the concluding EOF Read.
 		// Then a check in the put loop will kick in.
-		c.chunkLimit = c.chunkSize
+		// Note #2:
+		// The crypt backend after receiving EOF here will call Read again
+		// and we must insist on returning EOF, so we postpone refilling
+		// chunkLimit to the main loop.
 		return 0, io.EOF
 	}
 	if int64(len(buf)) > c.chunkLimit {

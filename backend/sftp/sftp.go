@@ -11,7 +11,6 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/user"
 	"path"
 	"regexp"
 	"strconv"
@@ -33,6 +32,7 @@ import (
 	"github.com/rclone/rclone/lib/readers"
 	sshagent "github.com/xanzy/ssh-agent"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const (
@@ -43,7 +43,7 @@ const (
 )
 
 var (
-	currentUser = readCurrentUser()
+	currentUser = env.CurrentUser()
 )
 
 func init() {
@@ -82,6 +82,21 @@ func init() {
 Only PEM encrypted key files (old OpenSSH format) are supported. Encrypted keys
 in the new OpenSSH format can't be used.`,
 			IsPassword: true,
+		}, {
+			Name: "pubkey_file",
+			Help: `Optional path to public key file.
+
+Set this if you have a signed certificate you want to use for authentication.` + env.ShellExpandHelp,
+		}, {
+			Name: "known_hosts_file",
+			Help: `Optional path to known_hosts file.
+
+Set this value to enable server host key validation.` + env.ShellExpandHelp,
+			Advanced: true,
+			Examples: []fs.OptionExample{{
+				Value: "~/.ssh/known_hosts",
+				Help:  "Use OpenSSH's known_hosts file",
+			}},
 		}, {
 			Name: "key_use_agent",
 			Help: `When set forces the usage of the ssh-agent.
@@ -190,6 +205,8 @@ type Options struct {
 	KeyPem            string `config:"key_pem"`
 	KeyFile           string `config:"key_file"`
 	KeyFilePass       string `config:"key_file_pass"`
+	PubKeyFile        string `config:"pubkey_file"`
+	KnownHostsFile    string `config:"known_hosts_file"`
 	KeyUseAgent       bool   `config:"key_use_agent"`
 	UseInsecureCipher bool   `config:"use_insecure_cipher"`
 	DisableHashCheck  bool   `config:"disable_hashcheck"`
@@ -218,6 +235,7 @@ type Fs struct {
 	poolMu       sync.Mutex
 	pool         []*conn
 	pacer        *fs.Pacer // pacer for operations
+	savedpswd    string
 }
 
 // Object is a remote SFTP file that has been stat'd (so it exists, but is not necessarily open for reading)
@@ -229,20 +247,6 @@ type Object struct {
 	mode    os.FileMode // mode bits from the file
 	md5sum  *string     // Cached MD5 checksum
 	sha1sum *string     // Cached SHA1 checksum
-}
-
-// readCurrentUser finds the current user name or "" if not found
-func readCurrentUser() (userName string) {
-	usr, err := user.Current()
-	if err == nil {
-		return usr.Username
-	}
-	// Fall back to reading $USER then $LOGNAME
-	userName = os.Getenv("USER")
-	if userName != "" {
-		return userName
-	}
-	return os.Getenv("LOGNAME")
 }
 
 // dial starts a client connection to the given SSH server. It is a
@@ -410,6 +414,10 @@ func (f *Fs) putSftpConnection(pc **conn, err error) {
 // NewFs creates a new Fs object from the name and root. It connects to
 // the host specified in the config file.
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
+	// This will hold the Fs object.  We need to create it here
+	// so we can refer to it in the SSH callback, but it's populated
+	// in NewFsWithConnection
+	f := &Fs{}
 	ctx := context.Background()
 	// Parse config into Options struct
 	opt := new(Options)
@@ -423,12 +431,21 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if opt.Port == "" {
 		opt.Port = "22"
 	}
+
 	sshConfig := &ssh.ClientConfig{
 		User:            opt.User,
 		Auth:            []ssh.AuthMethod{},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         fs.Config.ConnectTimeout,
 		ClientVersion:   "SSH-2.0-" + fs.Config.UserAgent,
+	}
+
+	if opt.KnownHostsFile != "" {
+		hostcallback, err := knownhosts.New(opt.KnownHostsFile)
+		if err != nil {
+			return nil, errors.Wrap(err, "couldn't parse known_hosts_file")
+		}
+		sshConfig.HostKeyCallback = hostcallback
 	}
 
 	if opt.UseInsecureCipher {
@@ -438,6 +455,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	keyFile := env.ShellExpand(opt.KeyFile)
+	pubkeyFile := env.ShellExpand(opt.PubKeyFile)
 	//keyPem := env.ShellExpand(opt.KeyPem)
 	// Add ssh agent-auth if no password or file or key PEM specified
 	if (opt.Pass == "" && keyFile == "" && !opt.AskPassword && opt.KeyPem == "") || opt.KeyUseAgent {
@@ -507,7 +525,38 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to parse private key file")
 		}
-		sshConfig.Auth = append(sshConfig.Auth, ssh.PublicKeys(signer))
+
+		// If a public key has been specified then use that
+		if pubkeyFile != "" {
+			certfile, err := ioutil.ReadFile(pubkeyFile)
+			if err != nil {
+				return nil, errors.Wrap(err, "unable to read cert file")
+			}
+
+			pk, _, _, _, err := ssh.ParseAuthorizedKey(certfile)
+			if err != nil {
+				return nil, errors.Wrap(err, "unable to parse cert file")
+			}
+
+			// And the signer for this, which includes the private key signer
+			// This is what we'll pass to the ssh client.
+			// Normally the ssh client will use the public key built
+			// into the private key, but we need to tell it to use the user
+			// specified public key cert.  This signer is specific to the
+			// cert and will include the private key signer.  Now ssh
+			// knows everything it needs.
+			cert, ok := pk.(*ssh.Certificate)
+			if !ok {
+				return nil, errors.New("public key file is not a certificate file: " + pubkeyFile)
+			}
+			pubsigner, err := ssh.NewCertSigner(cert, signer)
+			if err != nil {
+				return nil, errors.Wrap(err, "error generating cert signer")
+			}
+			sshConfig.Auth = append(sshConfig.Auth, ssh.PublicKeys(pubsigner))
+		} else {
+			sshConfig.Auth = append(sshConfig.Auth, ssh.PublicKeys(signer))
+		}
 	}
 
 	// Auth from password if specified
@@ -519,30 +568,45 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		sshConfig.Auth = append(sshConfig.Auth, ssh.Password(clearpass))
 	}
 
-	// Ask for password if none was defined and we're allowed to
+	// Config for password if none was defined and we're allowed to
+	// We don't ask now; we ask if the ssh connection succeeds
 	if opt.Pass == "" && opt.AskPassword {
-		_, _ = fmt.Fprint(os.Stderr, "Enter SFTP password: ")
-		clearpass := config.ReadPassword()
-		sshConfig.Auth = append(sshConfig.Auth, ssh.Password(clearpass))
+		sshConfig.Auth = append(sshConfig.Auth, ssh.PasswordCallback(f.getPass))
 	}
 
-	return NewFsWithConnection(ctx, name, root, m, opt, sshConfig)
+	return NewFsWithConnection(ctx, f, name, root, m, opt, sshConfig)
+}
+
+// If we're in password mode and ssh connection succeeds then this
+// callback is called.  First time around we ask the user, and then
+// save it so on reconnection we give back the previous string.
+// This removes the ability to let the user correct a mistaken entry,
+// but means that reconnects are transparent.
+// We'll re-use config.Pass for this, 'cos we know it's not been
+// specified.
+func (f *Fs) getPass() (string, error) {
+	for f.savedpswd == "" {
+		_, _ = fmt.Fprint(os.Stderr, "Enter SFTP password: ")
+		f.savedpswd = config.ReadPassword()
+	}
+	return f.savedpswd, nil
 }
 
 // NewFsWithConnection creates a new Fs object from the name and root and an ssh.ClientConfig. It connects to
 // the host specified in the ssh.ClientConfig
-func NewFsWithConnection(ctx context.Context, name string, root string, m configmap.Mapper, opt *Options, sshConfig *ssh.ClientConfig) (fs.Fs, error) {
-	f := &Fs{
-		name:      name,
-		root:      root,
-		absRoot:   root,
-		opt:       *opt,
-		m:         m,
-		config:    sshConfig,
-		url:       "sftp://" + opt.User + "@" + opt.Host + ":" + opt.Port + "/" + root,
-		mkdirLock: newStringLock(),
-		pacer:     fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-	}
+func NewFsWithConnection(ctx context.Context, f *Fs, name string, root string, m configmap.Mapper, opt *Options, sshConfig *ssh.ClientConfig) (fs.Fs, error) {
+	// Populate the Filesystem Object
+	f.name = name
+	f.root = root
+	f.absRoot = root
+	f.opt = *opt
+	f.m = m
+	f.config = sshConfig
+	f.url = "sftp://" + opt.User + "@" + opt.Host + ":" + opt.Port + "/" + root
+	f.mkdirLock = newStringLock()
+	f.pacer = fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant)))
+	f.savedpswd = ""
+
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 		SlowHash:                true,
@@ -888,7 +952,7 @@ func (f *Fs) run(cmd string) ([]byte, error) {
 
 	session, err := c.sshClient.NewSession()
 	if err != nil {
-		return nil, errors.Wrap(err, "run: get SFTP sessiion")
+		return nil, errors.Wrap(err, "run: get SFTP session")
 	}
 	defer func() {
 		_ = session.Close()
@@ -1087,7 +1151,7 @@ func shellEscape(str string) string {
 func parseHash(bytes []byte) string {
 	// For strings with backslash *sum writes a leading \
 	// https://unix.stackexchange.com/q/313733/94054
-	return strings.Split(strings.TrimLeft(string(bytes), "\\"), " ")[0] // Split at hash / filename separator
+	return strings.ToLower(strings.Split(strings.TrimLeft(string(bytes), "\\"), " ")[0]) // Split at hash / filename separator / all convert to lowercase
 }
 
 // Parses the byte array output from the SSH session

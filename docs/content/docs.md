@@ -757,6 +757,8 @@ This can be useful for tracking down problems with syncs in
 combination with the `-v` flag.  See the [Logging section](#logging)
 for more info.
 
+If FILE exists then rclone will append to it.
+
 Note that if you are using the `logrotate` program to manage rclone's
 logs, then you should use the `copytruncate` option as rclone doesn't
 have a signal to rotate logs.
@@ -1106,6 +1108,11 @@ Note: On Windows until [this bug](https://github.com/Azure/go-ansiterm/issues/26
 is fixed all non-ASCII characters will be replaced with `.` when
 `--progress` is in use.
 
+### --progress-terminal-title ###
+
+This flag, when used with `-P/--progress`, will print the string `ETA: %s`
+to the terminal title.
+
 ### -q, --quiet ###
 
 This flag will limit rclone's output to error messages only.
@@ -1251,10 +1258,16 @@ or with `--backup-dir`. See `--backup-dir` for more info.
 
 For example
 
-    rclone sync -i /path/to/local/file remote:current --suffix .bak
+    rclone copy -i /path/to/local/file remote:current --suffix .bak
 
-will sync `/path/to/local` to `remote:current`, but for any files
+will copy `/path/to/local` to `remote:current`, but for any files
 which would have been updated or deleted have .bak added.
+
+If using `rclone sync` with `--suffix` and without `--backup-dir` then
+it is recommended to put a filter rule in excluding the suffix
+otherwise the `sync` will delete the backup files.
+
+    rclone sync -i /path/to/local/file remote:current --suffix .bak --exclude "*.bak"
 
 ### --suffix-keep-extension ###
 
@@ -1328,8 +1341,10 @@ will be considered.
 
 If the destination does not support server-side copy or move, rclone
 will fall back to the default behaviour and log an error level message
-to the console. Note: Encrypted destinations are not supported
-by `--track-renames`.
+to the console.
+
+Encrypted destinations are not currently supported by `--track-renames`
+if `--track-renames-strategy` includes `hash`.
 
 Note that `--track-renames` is incompatible with `--no-traverse` and
 that it uses extra memory to keep track of all the rename candidates.
@@ -1357,6 +1372,8 @@ Using `--track-renames-strategy modtime` or `leaf` can enable
 `--track-renames` support for encrypted destinations.
 
 If nothing is specified, the default option is matching by `hash`es.
+
+Note that the `hash` strategy is not supported with encrypted destinations.
 
 ### --delete-(before,during,after) ###
 
